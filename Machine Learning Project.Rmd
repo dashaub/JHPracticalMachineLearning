@@ -1,0 +1,137 @@
+---
+title: "Machine Learning Project"
+output: html_document
+---
+The dataset contains measuremenets from many different sensors. Our goal is to analyze the data and apply a machine learning algorithm that can predict the classe (A, B, C, or D) that an activity was based on these readings. First, we load the required packages and the "training" and "testing" datasets. We will apply cross validation that requires repetition and can be done in parallel. The caret package can utilize multiple cores on a Linux computer if we register those with the doMC package.
+
+
+```{r, cache = T}
+# Load the caret and doMC packages
+# doMC will be used to register multiple cores and on a quad-core Linux machine
+require(caret)
+require(doMC)
+registerDoMC(cores = 4)
+
+# Load data from training and testing CSVs
+# The training file will be divided into a training and testing set, and the testing
+# file will be the prediction set
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+
+```
+
+After loading the datasets we perform some cleaning on the data to make the covariates more useful for our algorithm. The first seven fields contain timestamps and other measures not useful for our algorithm, so we remove these from both dataframes. Next, we convert the "classe" variable to a categorical factor. Many machine learning algorithms only work on numeric data, so we convert the remaining covariates to numeric.
+
+```{r, cache = T}
+# Remove the first seven columns that contain useless fields
+training <- training[, -c(1:7)]
+testing <- testing[, -c(1:7)]
+
+
+# Change "classe" to factor and all others to numeric
+training$classe <- as.factor(training$classe)
+endindex <- dim(training)[2]
+training[,-endindex] <- data.frame(sapply(training[,-endindex],as.numeric))
+testing[,-endindex] <- data.frame(sapply(testing[,-endindex],as.numeric))
+```
+
+Many of these variables will not be useful, however, since they have very little variability. Furthermore, several covariates in the prediction set are all NA, so these will be of no use and must be removed.
+```{r, cache = T}
+# Remove near-zero variance variables
+nzv <- nearZeroVar(training)
+training <- training[, -nzv]
+testing <- testing[, -nzv]
+
+# Find and remove columns that contain all NA in prediction set.
+allna <- which(as.vector(sapply(testing, function(x)all(is.na(x)))) == T)
+testing <- testing[, -allna]
+training <- training[, -allna]
+
+```
+
+Furthermore, covariates that are highly correlated can pose problems for some algorithms (e.g. increasing the variance of estimated coefficients for regression models). By removing these variables our model will not only be quicker since fewer variables must be considered but also likely more precise by honing in on only the useful predictors.
+
+```{r, cache = T}
+# Find and remove columns that are highly correlated
+cormat <- cor(training[, -endindex])
+highcor <- findCorrelation(cormat, cutoff = 0.95)
+training <- training[, -highcor]
+testing <- testing[, -highcor]
+```
+
+Our dataframes have now been cleaned down to 48 predictors and the classe variable and are ready for applying our prediction algorithms. Although the dataframes are named "training" and "testing", the "testing" dataframe is really our prediction set. We therefore divide the "training" set into a training and testing set for our analysis and cross validation. We set the trainControl parameters for 5-fold cross validation. This will gives us an estimate for our out-of-sample accuracy and error with a balanced trade off between bias and accuracy.
+
+```{r, cache = T}
+# Divide data from training CSV into a training and testing set
+set.seed(420)
+ind <- createDataPartition(training$classe, p = 0.7, list = F)
+s_train <- training[ind, ]
+s_test <- training[-ind, ]
+
+# Set parameters for 5-fold cross validation performed 10 times
+fitctrl <- trainControl(method = "repeatedcv", number = 5)
+```
+
+We now train our models. We apply a number of different algorithms to our training set and will choose the method which performs best on our set. We consider the following: random forests, stochastic gradient boosting, a support vector machine model with radial bias kernel function, and linear discriminant analysis. We also make predictions for these models on our training sets to analyze the in-sample accuracy and error.
+
+```{r, cache = T, eval = T}
+# Construct models and perform prediction on the test set
+rfMod <- train(classe~., method = "rf", trControl = fitctrl, data = s_train)
+rfpred <- predict(rfMod, s_test)
+boostMod <- train(classe~., method = "gbm", trControl = fitctrl, data = s_train, verbose = F)
+boostpred <- predict(boostMod, s_test)
+svmMod <- train(classe~., method = "svmRadial", trControl = fitctrl, data = s_train)
+svmpred <- predict(svmMod,  s_test)
+ldaMod <- train(classe~., method = "lda", trControl = fitctrl,data = s_train)
+ldapred <- predict(ldaMod, s_test)
+```
+
+Now that we have constructed our models and produced predictions on our training set we also produce predictions on the witheld testing set. We see that the random forest method achieves excellent accuracy, classifying every prediction correctly in the training set and achiving greater than 99% accuracy on the testing set. Boosting also achieves solid accuracy greater than 95%, but svm--and lda in particular--fare far worse.
+
+```{r, cache = T}
+# Analyze the results for in-sample prediction
+rftrain <- predict(rfMod, s_train)
+boosttrain <- predict(boostMod, s_train)
+svmtrain <- predict(svmMod, s_train)
+ldatrain <- predict(ldaMod, s_train)
+confusionMatrix(rftrain, s_train$classe)
+confusionMatrix(boosttrain, s_train$classe)
+confusionMatrix(svmtrain, s_train$classe)
+confusionMatrix(ldatrain, s_train$classe)
+
+# Analyze the results for out-of-sample prediction
+confusionMatrix(rfpred, s_test$classe)
+confusionMatrix(boostpred, s_test$classe)
+confusionMatrix(svmpred, s_test$classe)
+confusionMatrix(ldapred, s_test$classe)
+```
+
+With our model selection complete, we now turn to examining the most influential variables and predicting on the prediction set.
+
+```{r, cache = T}
+plot(varImp(rfMod), top = 10)
+```
+  
+    
+The variables yaw_belt, amplitude_pitch_belt, and pitch_forearm are all very influencial in the model. This model achieves accuracy of 99.51% on the witheld test set, so we estimate the out-of-sample error rate of 0.49%. Finally the predictions are added to a dataframe for comparison.
+
+```{r, cache = T, eval = FALSE}
+# Create predictions
+rfpredictions <-  predict(rfMod, testing)
+boostpredictions <- predict(boostMod, testing)
+svmpredictions <- predict(svmMod, testing)
+ldapredictions <- predict(ldaMod, testing)
+finalpredictions <- data.frame(rfpredictions, boostpredictions, svmpredictions, ldapredictions)
+
+# Write predictions to file
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(finalpredictions$rfpredictions)
+```
+Interestingly the random forest, boosting, and svm all produce the same prediction on the prediction set. After submitting the results we see this achieves 100% accuracy on the prediction set. 
